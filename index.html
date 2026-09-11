@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Oahu Rental Tax Calculator</title>
+<style>
+  :root { color-scheme: light; --border:#d9dee7; --muted:#667085; --bg:#f6f8fb; --card:#fff; --accent:#1f6feb; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:var(--bg); color:#182230; }
+  .wrap { max-width:1500px; margin:0 auto; padding:28px; }
+  h1 { margin:0 0 6px; font-size:28px; }
+  .subtitle { color:var(--muted); margin-bottom:22px; }
+  .controls,.card { background:var(--card); border:1px solid var(--border); border-radius:14px; box-shadow:0 2px 10px rgba(16,24,40,.04); }
+  .controls { padding:16px; display:flex; gap:14px; align-items:end; flex-wrap:wrap; margin-bottom:18px; }
+  label { display:flex; flex-direction:column; gap:6px; font-size:13px; font-weight:600; }
+  select,button { height:40px; border:1px solid #cbd2dc; border-radius:9px; background:white; padding:0 12px; font:inherit; }
+  button { cursor:pointer; background:var(--accent); color:white; border-color:var(--accent); font-weight:650; }
+  button.secondary { background:white; color:#182230; border-color:#cbd2dc; }
+  .status { margin-left:auto; color:var(--muted); font-size:13px; }
+  .card { overflow:hidden; }
+  .table-wrap { overflow:auto; max-height:62vh; }
+  table { border-collapse:separate; border-spacing:0; width:100%; min-width:1250px; font-size:13px; }
+  th,td { padding:9px 10px; border-bottom:1px solid #edf0f4; border-right:1px solid #f0f2f5; white-space:nowrap; }
+  th { position:sticky; top:0; z-index:2; background:#f8fafc; text-align:left; font-size:12px; }
+  td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  tbody tr:hover { background:#fafcff; }
+  tfoot td { position:sticky; bottom:0; background:#eef5ff; font-weight:700; border-top:2px solid #cbdcf8; }
+  .summary { padding:18px; border-top:1px solid var(--border); }
+  .summary h2 { margin:0 0 12px; font-size:17px; }
+  .summary table { min-width:0; width:auto; }
+  .summary th,.summary td { border:1px solid var(--border); }
+  .summary .total td { font-weight:750; background:#f8fafc; }
+  .note { margin-top:12px; color:var(--muted); font-size:12px; line-height:1.45; }
+  .empty { padding:40px; text-align:center; color:var(--muted); }
+  .error { padding:14px 16px; color:#9b1c1c; background:#fff1f1; border:1px solid #ffc9c9; border-radius:10px; margin-bottom:16px; display:none; }
+  @media (max-width:700px) { .wrap{padding:16px} .status{width:100%; margin-left:0} }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Oahu Rental Tax Calculator</h1>
+  <div class="subtitle">Select your Airbnb earnings CSV, then choose a year and month to generate the tax table.</div>
+
+  <div id="error" class="error"></div>
+
+  <div class="controls">
+    <label>Airbnb CSV
+      <input id="csvFile" type="file" accept=".csv,text/csv" style="height:40px; padding:7px 0;">
+    </label>
+    <label>Year
+      <select id="year"></select>
+    </label>
+    <label>Month
+      <select id="month">
+        <option value="1">January</option><option value="2">February</option><option value="3">March</option>
+        <option value="4">April</option><option value="5">May</option><option value="6">June</option>
+        <option value="7">July</option><option value="8">August</option><option value="9">September</option>
+        <option value="10">October</option><option value="11">November</option><option value="12">December</option>
+      </select>
+    </label>
+    <button id="generate">Generate tax table</button>
+    <button id="csv" class="secondary">Export table CSV</button>
+    <div id="status" class="status"></div>
+  </div>
+
+  <div class="card">
+    <div id="tableWrap" class="table-wrap"></div>
+    <div id="summary" class="summary"></div>
+  </div>
+</div>
+
+<script>
+let RAW_CSV = "";
+
+const headers = [
+  "Guest","Start date","End date","Nights","Host Payout","Room charge",
+  "Cleaning","Property Use Tax","Tax Rate","Host Service Fee","HI Taxable","Host Net Earning"
+];
+
+const moneyCols = new Set(["Host Payout","Room charge","Cleaning","Property Use Tax","Host Service Fee","HI Taxable","Host Net Earning"]);
+
+function parseCSV(text) {
+  const rows = [];
+  let row = [], field = "", quoted = false;
+  for (let i=0; i<text.length; i++) {
+    const c = text[i];
+    if (quoted) {
+      if (c === '"') {
+        if (text[i+1] === '"') { field += '"'; i++; }
+        else quoted = false;
+      } else field += c;
+    } else {
+      if (c === '"') quoted = true;
+      else if (c === ',') { row.push(field); field=""; }
+      else if (c === '\n') { row.push(field); rows.push(row); row=[]; field=""; }
+      else if (c !== '\r') field += c;
+    }
+  }
+  if (field.length || row.length) { row.push(field); rows.push(row); }
+  const hdr = rows.shift();
+  return rows.filter(r => r.some(x => x !== "")).map(r => Object.fromEntries(hdr.map((h,i)=>[h, r[i] ?? ""])));
+}
+
+function num(v) {
+  if (v === null || v === undefined || v === "") return 0;
+  const n = Number(String(v).replace(/[$,]/g,""));
+  return Number.isFinite(n) ? n : 0;
+}
+function money(v) { return num(v).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2}); }
+function pct(v) { return (num(v)*100).toFixed(2) + "%"; }
+function parseDate(s) {
+  const m = String(s).match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (!m) return null;
+  return new Date(Number(m[3]), Number(m[1])-1, Number(m[2]));
+}
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function csvEscape(s) {
+  s = String(s ?? "");
+  return /[",\n]/.test(s) ? '"' + s.replace(/"/g,'""') + '"' : s;
+}
+
+let data = [];
+let years = [];
+const yearEl = document.getElementById("year");
+const fileEl = document.getElementById("csvFile");
+const generateEl = document.getElementById("generate");
+
+function loadCSVText(csvText, fileName) {
+  RAW_CSV = csvText;
+  data = parseCSV(RAW_CSV);
+  const dates = data.map(r=>parseDate(r.Date)).filter(Boolean);
+  years = [...new Set(dates.map(d=>d.getFullYear()))].sort((a,b)=>b-a);
+
+  yearEl.innerHTML = "";
+  years.forEach(y => {
+    const o=document.createElement("option");
+    o.value=y; o.textContent=y;
+    yearEl.appendChild(o);
+  });
+
+  if (years.length) {
+    const currentYear = new Date().getFullYear();
+    yearEl.value = years.includes(currentYear) ? String(currentYear) : String(years[0]);
+    generateEl.disabled = false;
+    render();
+  } else {
+    generateEl.disabled = true;
+    document.getElementById("status").textContent = "No valid dates found in the CSV.";
+  }
+  document.getElementById("status").textContent =
+    `${fileName}: ${data.length} source rows loaded`;
+}
+
+fileEl.addEventListener("change", () => {
+  const file = fileEl.files && fileEl.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    try {
+      loadCSVText(e.target.result, file.name);
+    } catch (err) {
+      document.getElementById("error").textContent = "Could not read the selected CSV: " + err.message;
+      document.getElementById("error").style.display = "block";
+    }
+  };
+  reader.readAsText(file);
+});
+
+function makeRecords(year, month) {
+  // Airbnb's export can combine multiple reservations under one payout date.
+  // Build one tax record per Reservation, using its matching Pass Through row.
+  // For an unambiguous single-reservation payout date, Paid out is used directly.
+  // When the payout is aggregated across reservations, the reservation-level
+  // payout is reconstructed from the reservation gross + pass-through - service fee,
+  // which preserves the CSV's payout economics and avoids duplicating an aggregate.
+  const byDate = new Map();
+  data.forEach(r => {
+    const d = parseDate(r.Date);
+    if (!d || d.getFullYear() !== year || d.getMonth()+1 !== month) return;
+    if (!byDate.has(r.Date)) byDate.set(r.Date, []);
+    byDate.get(r.Date).push(r);
+  });
+
+  const out = [];
+  for (const [date, rows] of byDate) {
+    const reservations = rows.filter(r=>r.Type === "Reservation");
+    const passes = rows.filter(r=>r.Type === "Pass Through Tot");
+    const payouts = rows.filter(r=>r.Type === "Payout" && num(r["Paid out"]) !== 0);
+    const payoutTotal = payouts.reduce((s,r)=>s+num(r["Paid out"]),0);
+
+    reservations.forEach((r, idx) => {
+      const code = r["Confirmation code"];
+      const pass = passes.find(p => p["Confirmation code"] === code);
+      const propertyTax = pass ? num(pass.Amount) : 0;
+      const cleaning = num(r["Cleaning fee"]);
+      const serviceFee = num(r["Service fee"]);
+      const hiTaxable = num(r["Gross earnings"]);
+      let hostPayout;
+
+      if (reservations.length === 1 && payouts.length === 1) {
+        hostPayout = payoutTotal;
+      } else {
+        hostPayout = hiTaxable + propertyTax - serviceFee;
+      }
+
+      const roomCharge = hostPayout - cleaning - propertyTax + serviceFee;
+      const denominator = roomCharge + cleaning;
+      const taxRate = denominator ? propertyTax / denominator : 0;
+      const hostNet = roomCharge - serviceFee;
+
+      out.push({
+        "Guest": r["Guest"],
+        "Start date": r["Start date"],
+        "End date": r["End date"],
+        "Nights": num(r["Nights"]),
+        "Host Payout": hostPayout,
+        "Room charge": roomCharge,
+        "Cleaning": cleaning,
+        "Property Use Tax": propertyTax,
+        "Tax Rate": taxRate,
+        "Host Service Fee": serviceFee,
+        "HI Taxable": hiTaxable,
+        "Host Net Earning": hostNet,
+        _date: date
+      });
+    });
+  }
+  out.sort((a,b)=>a._date.localeCompare(b._date) || a["Guest"].localeCompare(b["Guest"]));
+  return out;
+}
+
+let currentRows = [];
+
+function render() {
+  if (!data.length || !yearEl.value) {
+    document.getElementById("tableWrap").innerHTML = '<div class="empty">Select an Airbnb CSV file to begin.</div>';
+    document.getElementById("summary").innerHTML = "";
+    return;
+  }
+  const year = Number(yearEl.value);
+  const month = Number(document.getElementById("month").value);
+  currentRows = makeRecords(year, month);
+
+  const tableWrap = document.getElementById("tableWrap");
+  const summary = document.getElementById("summary");
+  const status = document.getElementById("status");
+
+  status.textContent = `${currentRows.length} reservation${currentRows.length===1?"":"s"} for ${new Date(year,month-1,1).toLocaleString("en-US",{month:"long"})} ${year}`;
+
+  if (!currentRows.length) {
+    tableWrap.innerHTML = '<div class="empty">No reservation records found for the selected month.</div>';
+    summary.innerHTML = "";
+    return;
+  }
+
+  const totals = {};
+  moneyCols.forEach(c=>totals[c]=0);
+  currentRows.forEach(r=>moneyCols.forEach(c=>totals[c]+=num(r[c])));
+
+  let html = "<table><thead><tr>";
+  headers.forEach(h=>html += `<th class="${moneyCols.has(h)||h==="Tax Rate"||h==="Nights"?"num":""}">${esc(h)}</th>`);
+  html += "</tr></thead><tbody>";
+
+  currentRows.forEach(r=>{
+    html += "<tr>";
+    headers.forEach(h=>{
+      let v = r[h];
+      if (moneyCols.has(h)) v = money(v);
+      else if (h==="Tax Rate") v = pct(v);
+      else if (h==="Nights") v = num(v).toLocaleString("en-US");
+      html += `<td class="${moneyCols.has(h)||h==="Tax Rate"||h==="Nights"?"num":""}">${esc(v)}</td>`;
+    });
+    html += "</tr>";
+  });
+
+  html += "<tfoot><tr>";
+  headers.forEach((h,i)=>{
+    if (i===0) html += "<td>Total</td>";
+    else if (moneyCols.has(h)) html += `<td class="num">${money(totals[h])}</td>`;
+    else html += "<td></td>";
+  });
+  html += "</tr></tfoot></table>";
+  tableWrap.innerHTML = html;
+
+  const g45 = totals["HI Taxable"] * 0.045;
+  const ta1 = totals["HI Taxable"] * 0.11;
+  const honolulu = totals["HI Taxable"] * 0.03;
+  const totalTax = g45 + ta1 + honolulu;
+
+  summary.innerHTML = `
+    <h2>Tax summary</h2>
+    <table>
+      <thead><tr><th>Tax type</th><th>Tax rate</th><th>Tax due</th></tr></thead>
+      <tbody>
+        <tr><td>G-45</td><td class="num">4.50%</td><td class="num">$${money(g45)}</td></tr>
+        <tr><td>TA-1</td><td class="num">11.00%</td><td class="num">$${money(ta1)}</td></tr>
+        <tr><td>TA for Honolulu</td><td class="num">3.00%</td><td class="num">$${money(honolulu)}</td></tr>
+        <tr class="total"><td></td><td class="num">18.50%</td><td class="num">$${money(totalTax)}</td></tr>
+      </tbody>
+    </table>
+    <div class="note">
+      Tax due is calculated from the sum of <b>HI Taxable</b>. The fixed rates are 4.5%, 11%, and 3%.
+      The source export can contain an aggregate Payout row when multiple reservations share a payout date;
+      in that case the app derives the reservation-level Host Payout from the reservation and Pass Through amounts
+      so an aggregate payout is not duplicated across rows.
+    </div>`;
+}
+
+document.getElementById("generate").addEventListener("click", render);
+yearEl.addEventListener("change", render);
+document.getElementById("month").addEventListener("change", render);
+
+document.getElementById("csv").addEventListener("click", ()=>{
+  if (!data.length || !currentRows.length) return;
+  const year = Number(yearEl.value);
+  const month = Number(document.getElementById("month").value);
+  const lines = [headers.map(csvEscape).join(",")];
+  currentRows.forEach(r=>{
+    lines.push(headers.map(h=>{
+      if (h==="Tax Rate") return csvEscape((num(r[h])*100).toFixed(2)+"%");
+      if (moneyCols.has(h)) return csvEscape(num(r[h]).toFixed(2));
+      return csvEscape(r[h]);
+    }).join(","));
+  });
+  const totals = {};
+  moneyCols.forEach(c=>totals[c]=0);
+  currentRows.forEach(r=>moneyCols.forEach(c=>totals[c]+=num(r[c])));
+  lines.push(headers.map((h,i)=>{
+    if (i===0) return "Total";
+    if (moneyCols.has(h)) return totals[h].toFixed(2);
+    return "";
+  }).map(csvEscape).join(","));
+  const g45=totals["HI Taxable"]*.045, ta1=totals["HI Taxable"]*.11, hon=totals["HI Taxable"]*.03;
+  lines.push("");
+  lines.push(["G-45","0.045",g45.toFixed(2)].map(csvEscape).join(","));
+  lines.push(["TA-1","0.11",ta1.toFixed(2)].map(csvEscape).join(","));
+  lines.push(["TA for Honolulu","0.03",hon.toFixed(2)].map(csvEscape).join(","));
+  lines.push(["","0.185",(g45+ta1+hon).toFixed(2)].map(csvEscape).join(","));
+
+  const blob = new Blob([lines.join("\r\n")],{type:"text/csv;charset=utf-8"});
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);
+  a.download=`oahu-rental-tax-${year}-${String(month).padStart(2,"0")}.csv`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
+
+generateEl.disabled = true;
+render();
+</script>
+</body>
+</html>
